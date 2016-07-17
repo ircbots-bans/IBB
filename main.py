@@ -1,12 +1,15 @@
 import zirc, ssl
+import parser
 import threading
 import requests
-from time import sleep
+from time import sleep, time
+from fnmatch import fnmatch
+import repl
 
 mainChannel = "##ircbots-bans"
 banFile = "https://raw.githubusercontent.com/ircbots-bans/ircbots-bans/master/bans.md"
 exemptFile = "https://raw.githubusercontent.com/ircbots-bans/ircbots-bans/master/exempts.md"
-refreshRate = 30 # 300
+refreshRate = 60 # 20 # 300
 
 class Bot(zirc.Client):
     def __init__(self):
@@ -14,14 +17,16 @@ class Bot(zirc.Client):
         self.config = zirc.IRCConfig(host="irc.freenode.net", 
             port=6697,
             nickname="IBB",
-            ident="bot",
-            realname="IRC Bot Bans",
+            ident="ibb",
+            realname="Utility bot for ##ircbots-bans",
             channels=[mainChannel],
             sasl_user="IBB",
-            sasl_pass="123456789") # ^_^
+            sasl_pass="") # ^_^
         self.connect(self.config)
         
         self.sync = False
+        
+        self.admins = ["*!*@zirc/dev/zz"]
         
         self.start()
         
@@ -32,23 +37,32 @@ class Bot(zirc.Client):
             affected = event.arguments[1]
             
             if event.arguments == ["+o", self.config["nickname"]]:
+                self.GitHubData = []
                 self.bans = []
                 self.exempts = []
             
                 self.syncChannel()
             
-            if mode == "+e":
-                self.exempts.append(raw[4])
-
-            elif mode == "-e":
-                self.exempts.remove(raw[4])
+            else:
+                parsedModes = parser.split_modes(raw[3:])
                 
-            elif mode == "+b":
-                self.bans.append(raw[4])
+                for item in parsedModes:
+                    item = item.split()
+                    
+                    if item[0] == "+b" and item[1] not in self.bans:
+                        self.bans.append(item[1])
+                    
+                    elif item[0] == "-b" and item[1] in self.bans:
+                        self.bans.remove(item[1])
+                        
+                    if item[0] == "+e" and item[1] not in self.exempts:
+                        self.exempts.append(item[1])
+                    
+                    elif item[0] == "-e" and item[1] in self.exempts:
+                        self.exempts.remove(item[1])
                 
-            elif mode == "-b":
-                self.bans.remove(raw[4])
-
+            self.applyChanges()
+            
     def on_all(self, event):
         message = event.raw.split()
         
@@ -67,18 +81,17 @@ class Bot(zirc.Client):
             
             if self.syncedBans and self.syncedExempts:
                 self.sync = False
-                self.checkBanHash()
-
+                checkThread = threading.Thread(target=self.checkBanHash)
+                checkThread.setDaemon(True)
+                checkThread.start()
+                
     def syncChannel(self):
         if not self.sync:
             self.sync = True
             self.syncedExempts = False
             self.syncedBans = False
             
-            self.send("MODE " + mainChannel + " b")
-            self.send("MODE " + mainChannel + " e")
-            #You can also use: (less bandwidth :p)
-            #self.send("MODE " + mainChannel + " be")
+            self.send("MODE " + mainChannel + " be")
         
     def parseBanFile(self, banData, exemptData): #does this need to be part of Bot(zirc.Client) ? no
         banData = banData.split("\n")[2:]  # Skip two first unneeded lines
@@ -119,52 +132,38 @@ class Bot(zirc.Client):
         
         for item in self.GitHubData:
             if item[0].split(" ")[0] == "exempt":
-                item[0] = " ".join(item[0].split(" ")[1:])
-                exempts.append(self.banType(item))
+                _item = [" ".join(item[0].split(" ")[1:])]+item[1:]
+                exempts.append(self.banType(_item))
                 
             else:
                 bans.append(self.banType(item))
                 
-        removeExempts = []
-        ammendExempts = []
-        removeBans = []        
-        ammendBans = []
+        modes = []
         
         for iteration, ban in enumerate(bans): # git
             if not ban in self.bans:
-                ammendBans.append(ban)
+                modes.append("+b " + ban)
         
-            elif self.bans[iteration] not in bans:
-                removeBans.append(self.bans[iteration])
+        for iteration, ban in enumerate(self.bans): #local
+            if (iteration + 1) <= len(self.bans) and self.bans[iteration] not in bans:
+                modes.insert(0, "-b " + self.bans[iteration]) # We should remove bans in first for some race conditions
                 
         for iteration, exempt in enumerate(exempts): # git
             if not exempt in self.exempts:
-                ammendExempts.append(exempts)
+                modes.append("+e " + exempt)
         
-            elif self.exempts[iteration] not in exempts:
-                removeExempts.append(self.exempts[iteration])
-                
-        #if removeBans or ammendBans:
-         #   self.privmsg(mainChannel, "{0} bans need to be added and {1} bans need to be removed"
-          #      .format(str(len(ammendBans)), str(len(removeBans)))
-           # )
+        for iteration, exempt in enumerate(self.exempts): # local
+            if (iteration + 1) <= len(self.exempts) and self.exempts[iteration] not in exempts:
+                modes.insert(0, "-e " + self.exempts[iteration]) # Same as above
+
+        #self.privmsg(mainChannel, "A " + str(modes))
+        parsedModes = parser.unsplit_modes(modes)
+        #self.privmsg(mainChannel, "B " + str(parsedModes))
             
-        #if removeExempts or ammendExempts:
-         #   self.privmsg(mainChannel, "{0} exempts need to be added and {1} exempts need to be removed"
-          #      .format(str(len(ammendExempts)), str(len(removeExempts)))
-           # )
-           
-        for ban in ammendBans:
-            self.send("MODE " + mainChannel + " +b " + str(ban))
-            
-        for ban in removeBans:
-            self.send("MODE " + mainChannel + " -b " + str(ban))
-              
-        for exempt in ammendExempts:
-            self.send("MODE " + mainChannel + " +e " + str(exempt))
-            
-        for exempt in removeExempts:
-            self.send("MODE " + mainChannel + " -e " + str(exempt))
+        if parsedModes:
+            self.send("MODE " + mainChannel + " " + parsedModes[0])
+        
+        return
             
     def checkBanHash(self):
         """
@@ -173,11 +172,19 @@ class Bot(zirc.Client):
 
         """
         while True:
-            banData = requests.get(banFile).text
-            exemptData = requests.get(exemptFile).text
+            banData = requests.get(banFile + "?" + str(time())).text
+            exemptData = requests.get(exemptFile + "?" + str(time())).text
             self.GitHubData = self.parseBanFile(banData, exemptData)       
             
             self.applyChanges()
             
             sleep(refreshRate)
+    def on_privmsg(bot,irc,event):
+        if " ".join(event.arguments).startswith("!>>"):
+            for admin in bot.admins:
+                if fnmatch(event.source, admin):
+                    output = repl.Repl({"bot": bot, "irc": irc, "event": event}).run(" ".join(event.arguments).replace("!>> ", "", 1))
+                    for line in output.split("\n"):
+                        irc.reply(event, line)
+                    break
 Bot()
