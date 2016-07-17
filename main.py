@@ -19,9 +19,9 @@ class Bot(zirc.Client):
             nickname="IBB",
             ident="ibb",
             realname="Utility bot for ##ircbots-bans",
-            channels=[mainChannel],
+            channels=[], # Moved to on_001
             sasl_user="IBB",
-            sasl_pass="") # ^_^
+            sasl_pass="")
         self.connect(self.config)
         
         self.sync = False
@@ -29,6 +29,12 @@ class Bot(zirc.Client):
         self.admins = ["*!*@zirc/dev/zz"]
         
         self.start()
+    
+    def on_001(self):
+        self.send("PRIVMSG NickServ :REGAIN " + self.config["nickname"])
+        self.send("NICK " + self.config["nickname"])
+        self.send("MODE " + self.config["nickname"] + " +QDRi-w")
+        self.send("JOIN " + mainChannel)
         
     def on_mode(self, event):
         if event.target == mainChannel:
@@ -187,4 +193,8 @@ class Bot(zirc.Client):
                     for line in output.split("\n"):
                         irc.reply(event, line)
                     break
+    def on_send(bot,data):
+        print("--> "+data)
+    def on_all(bot, raw):
+        print("<-- "+raw)
 Bot()
